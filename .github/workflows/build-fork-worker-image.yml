@@ -1,0 +1,59 @@
+name: Build fork worker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Tag to publish for the worker image"
+        required: true
+        default: "v3.178.0-otel-trace-direct-write-dc35ec876"
+      platforms:
+        description: "Comma-separated Docker platforms"
+        required: true
+        default: "linux/amd64,linux/arm64"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build-worker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          persist-credentials: false
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@4907a6ddec9925e35a0a9e82d7399ccc52663121 # v4.1.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push worker image
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          PLATFORMS: ${{ inputs.platforms }}
+        run: |
+          set -euo pipefail
+
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          image="ghcr.io/${owner}/langfuse-worker"
+          short_sha="$(git rev-parse --short=12 HEAD)"
+
+          docker buildx create --use --name fork-worker-builder
+          docker buildx build \
+            --platform "${PLATFORMS}" \
+            --file worker/Dockerfile \
+            --tag "${image}:${IMAGE_TAG}" \
+            --tag "${image}:sha-${short_sha}" \
+            --build-arg "NEXT_PUBLIC_BUILD_ID=${short_sha}" \
+            --provenance=false \
+            --sbom=false \
+            --push \
+            .
+
+          echo "Published ${image}:${IMAGE_TAG}"
+          echo "Published ${image}:sha-${short_sha}"

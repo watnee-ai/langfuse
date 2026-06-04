@@ -1,10 +1,53 @@
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   checkHeaderBasedDirectWrite,
   checkSdkVersionRequirements,
+  groupIngestionEventsByBodyId,
   getSdkInfoFromResourceSpans,
+  processOtelTraceEvents,
   type SdkInfo,
 } from "../otelIngestionQueue";
+import { env } from "../../env";
+import type { IngestionEventType } from "@langfuse/shared/src/server";
+
+const makeTraceEvent = ({
+  id,
+  timestamp,
+  name,
+  input,
+  output,
+}: {
+  id: string;
+  timestamp: string;
+  name?: string;
+  input?: unknown;
+  output?: unknown;
+}): IngestionEventType =>
+  ({
+    id: `event-${id}-${timestamp}`,
+    type: "trace-create",
+    timestamp,
+    body: {
+      id,
+      timestamp,
+      name,
+      input,
+      output,
+    },
+  }) as IngestionEventType;
+
+const auth = {
+  validKey: true,
+  scope: {
+    projectId: "project-1",
+    accessLevel: "project",
+  },
+} as const;
+
+afterEach(() => {
+  env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE = "false";
+  vi.restoreAllMocks();
+});
 
 describe("checkHeaderBasedDirectWrite", () => {
   it.each<{
@@ -236,5 +279,129 @@ describe("getSdkInfoFromResourceSpans (legacy fallback)", () => {
     },
   ])("$label", ({ input, expected }) => {
     expect(getSdkInfoFromResourceSpans(input)).toEqual(expected);
+  });
+});
+
+describe("processOtelTraceEvents", () => {
+  it("keeps the existing processEventBatch path when direct trace writes are disabled", async () => {
+    env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE = "false";
+
+    const traces = [
+      makeTraceEvent({
+        id: "trace-1",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      }),
+    ];
+    const processBatch = vi
+      .fn()
+      .mockResolvedValue({ successes: [], errors: [] });
+    const ingestionService = {
+      mergeAndWrite: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await processOtelTraceEvents({
+      traces,
+      auth,
+      ingestionService,
+      shouldForwardToEventsTable: true,
+      processBatch,
+    });
+
+    expect(processBatch).toHaveBeenCalledTimes(1);
+    expect(processBatch).toHaveBeenCalledWith(traces, auth, {
+      delay: 0,
+      source: "otel",
+      forwardToEventsTable: true,
+    });
+    expect(ingestionService.mergeAndWrite).not.toHaveBeenCalled();
+  });
+
+  it("writes trace groups directly when direct trace writes are enabled", async () => {
+    env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE = "true";
+
+    const traceA1 = makeTraceEvent({
+      id: "trace-a",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      name: "shallow",
+    });
+    const traceA2 = makeTraceEvent({
+      id: "trace-a",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      name: "full",
+      input: { prompt: "hello" },
+      output: { completion: "world" },
+    });
+    const traceB = makeTraceEvent({
+      id: "trace-b",
+      timestamp: "2026-01-01T00:00:02.000Z",
+      name: "other",
+    });
+    const traces = [traceA1, traceB, traceA2];
+    const processBatch = vi
+      .fn()
+      .mockResolvedValue({ successes: [], errors: [] });
+    const ingestionService = {
+      mergeAndWrite: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await processOtelTraceEvents({
+      traces,
+      auth,
+      ingestionService,
+      shouldForwardToEventsTable: true,
+      processBatch,
+    });
+
+    expect(processBatch).not.toHaveBeenCalled();
+    expect(ingestionService.mergeAndWrite).toHaveBeenCalledTimes(2);
+    expect(ingestionService.mergeAndWrite).toHaveBeenCalledWith(
+      "trace",
+      "project-1",
+      "trace-a",
+      expect.any(Date),
+      [traceA1, traceA2],
+      true,
+    );
+    expect(ingestionService.mergeAndWrite).toHaveBeenCalledWith(
+      "trace",
+      "project-1",
+      "trace-b",
+      expect.any(Date),
+      [traceB],
+      true,
+    );
+  });
+
+  it("keeps event order within each trace group so IngestionService owns merge semantics", () => {
+    const shallowTrace = makeTraceEvent({
+      id: "trace-a",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      name: "shallow",
+    });
+    const otherTrace = makeTraceEvent({
+      id: "trace-b",
+      timestamp: "2026-01-01T00:00:00.500Z",
+      name: "other",
+    });
+    const fullTrace = makeTraceEvent({
+      id: "trace-a",
+      timestamp: "2026-01-01T00:00:01.000Z",
+      name: "full",
+      input: { prompt: "hello" },
+      output: { completion: "world" },
+    });
+
+    expect(
+      Array.from(
+        groupIngestionEventsByBodyId([
+          shallowTrace,
+          otherTrace,
+          fullTrace,
+        ]).entries(),
+      ),
+    ).toEqual([
+      ["trace-a", [shallowTrace, fullTrace]],
+      ["trace-b", [otherTrace]],
+    ]);
   });
 });

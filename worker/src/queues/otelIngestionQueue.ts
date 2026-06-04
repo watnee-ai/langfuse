@@ -114,6 +114,68 @@ export type SdkInfo = {
   telemetrySdkLanguage: string | null;
 };
 
+export const groupIngestionEventsByBodyId = (
+  events: IngestionEventType[],
+): Map<string, IngestionEventType[]> => {
+  const eventsById = new Map<string, IngestionEventType[]>();
+
+  for (const event of events) {
+    const bodyId = event.body.id || "";
+    const existingEvents = eventsById.get(bodyId);
+
+    if (existingEvents) {
+      existingEvents.push(event);
+    } else {
+      eventsById.set(bodyId, [event]);
+    }
+  }
+
+  return eventsById;
+};
+
+export const processOtelTraceEvents = async ({
+  traces,
+  auth,
+  ingestionService,
+  shouldForwardToEventsTable,
+  processBatch = processEventBatch,
+}: {
+  traces: IngestionEventType[];
+  auth: Parameters<typeof processEventBatch>[1];
+  ingestionService: Pick<IngestionService, "mergeAndWrite">;
+  shouldForwardToEventsTable: boolean;
+  processBatch?: typeof processEventBatch;
+}): Promise<void> => {
+  if (env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE !== "true") {
+    await processBatch(traces, auth, {
+      delay: 0,
+      source: "otel",
+      forwardToEventsTable: shouldForwardToEventsTable,
+    });
+    return;
+  }
+
+  const traceEventsByTraceId = groupIngestionEventsByBodyId(traces);
+  const projectId = auth.scope.projectId;
+
+  if (!projectId) {
+    throw new ForbiddenError("Missing project ID");
+  }
+
+  await Promise.all(
+    Array.from(traceEventsByTraceId.entries()).map(([traceId, traceEvents]) =>
+      ingestionService.mergeAndWrite(
+        "trace",
+        projectId,
+        traceId,
+        new Date(),
+        traceEvents,
+        shouldForwardToEventsTable,
+      ),
+    ),
+  );
+};
+
 /**
  * Extract SDK information from resourceSpans.
  * Gets scope name/version and telemetry SDK language from the OTEL structure.
@@ -421,10 +483,11 @@ export const otelIngestionQueueProcessorBuilder = (
       // Process traces and observations concurrently
       await Promise.all([
         observationWritePromise,
-        processEventBatch(traces, auth, {
-          delay: 0,
-          source: "otel",
-          forwardToEventsTable: shouldForwardToEventsTable,
+        processOtelTraceEvents({
+          traces,
+          auth,
+          ingestionService,
+          shouldForwardToEventsTable,
         }),
       ]);
 

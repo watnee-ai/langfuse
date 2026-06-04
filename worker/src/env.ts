@@ -435,6 +435,7 @@ const EnvSchema = z.object({
   LANGFUSE_EXPERIMENT_INSERT_INTO_EVENTS_TABLE: z
     .enum(["true", "false"])
     .default("false"),
+  LANGFUSE_OTEL_TRACE_DIRECT_WRITE: z.enum(["true", "false"]).default("false"),
   LANGFUSE_EXPERIMENT_EARLY_EXIT_EVENT_BATCH_JOB: z
     .enum(["true", "false"])
     .default("false"),

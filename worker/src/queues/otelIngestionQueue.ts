@@ -19,6 +19,7 @@ import {
   traceException,
   compareVersions,
   ResourceSpan,
+  isTraceIdInSample,
 } from "@langfuse/shared/src/server";
 import {
   applyIngestionMasking,
@@ -139,12 +140,14 @@ export const processOtelTraceEvents = async ({
   ingestionService,
   shouldForwardToEventsTable,
   processBatch = processEventBatch,
+  traceSampler = isTraceIdInSample,
 }: {
   traces: IngestionEventType[];
   auth: Parameters<typeof processEventBatch>[1];
   ingestionService: Pick<IngestionService, "mergeAndWrite">;
   shouldForwardToEventsTable: boolean;
   processBatch?: typeof processEventBatch;
+  traceSampler?: typeof isTraceIdInSample;
 }): Promise<void> => {
   if (env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE !== "true") {
     await processBatch(traces, auth, {
@@ -163,16 +166,37 @@ export const processOtelTraceEvents = async ({
   }
 
   await Promise.all(
-    Array.from(traceEventsByTraceId.entries()).map(([traceId, traceEvents]) =>
-      ingestionService.mergeAndWrite(
+    Array.from(traceEventsByTraceId.entries()).map(([traceId, traceEvents]) => {
+      const { isSampled, isSamplingConfigured } = traceSampler({
+        projectId,
+        event: traceEvents[0],
+      });
+
+      if (!isSampled) {
+        recordIncrement("langfuse.ingestion.sampling", traceEvents.length, {
+          projectId,
+          sampling_decision: "out",
+        });
+
+        return;
+      }
+
+      if (isSamplingConfigured) {
+        recordIncrement("langfuse.ingestion.sampling", traceEvents.length, {
+          projectId,
+          sampling_decision: "in",
+        });
+      }
+
+      return ingestionService.mergeAndWrite(
         "trace",
         projectId,
         traceId,
         new Date(),
         traceEvents,
         shouldForwardToEventsTable,
-      ),
-    ),
+      );
+    }),
   );
 };
 

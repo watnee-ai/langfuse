@@ -372,6 +372,50 @@ describe("processOtelTraceEvents", () => {
     );
   });
 
+  it("keeps trace sampling semantics when direct trace writes are enabled", async () => {
+    env.LANGFUSE_OTEL_TRACE_DIRECT_WRITE = "true";
+
+    const sampledTrace = makeTraceEvent({
+      id: "trace-in",
+      timestamp: "2026-01-01T00:00:00.000Z",
+    });
+    const sampledOutTrace = makeTraceEvent({
+      id: "trace-out",
+      timestamp: "2026-01-01T00:00:01.000Z",
+    });
+    const processBatch = vi
+      .fn()
+      .mockResolvedValue({ successes: [], errors: [] });
+    const ingestionService = {
+      mergeAndWrite: vi.fn().mockResolvedValue(undefined),
+    };
+    const traceSampler = vi.fn(({ event }) => ({
+      isSampled: event.body.id !== "trace-out",
+      isSamplingConfigured: true,
+    }));
+
+    await processOtelTraceEvents({
+      traces: [sampledTrace, sampledOutTrace],
+      auth,
+      ingestionService,
+      shouldForwardToEventsTable: false,
+      processBatch,
+      traceSampler,
+    });
+
+    expect(processBatch).not.toHaveBeenCalled();
+    expect(traceSampler).toHaveBeenCalledTimes(2);
+    expect(ingestionService.mergeAndWrite).toHaveBeenCalledTimes(1);
+    expect(ingestionService.mergeAndWrite).toHaveBeenCalledWith(
+      "trace",
+      "project-1",
+      "trace-in",
+      expect.any(Date),
+      [sampledTrace],
+      false,
+    );
+  });
+
   it("keeps event order within each trace group so IngestionService owns merge semantics", () => {
     const shallowTrace = makeTraceEvent({
       id: "trace-a",

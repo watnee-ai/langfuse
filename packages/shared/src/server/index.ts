@@ -56,6 +56,7 @@ export * from "./repositories/definitions";
 export * from "../utils/IORepresentation/chatML/types";
 export * from "../server/ingestion/types";
 export * from "../server/ingestion/modelMatch";
+export * from "./ingestion/sampling";
 export * from "./ingestion/processEventBatch";
 export * from "../server/ingestion/validateAndInflateScore";
 export * from "./ingestion/extractToolsBackend";
